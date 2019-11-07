@@ -3,14 +3,18 @@ An IPython extension for generating and displaying asymptote figures within
 an IPython notebook. Refer to examples directory for usage examples.
 """
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+
+from IPython import get_ipython
 from IPython.core.magic import (
     magics_class, line_magic, line_cell_magic, Magics)
 from IPython.core.magic_arguments import (
     argument, magic_arguments, parse_argstring)
 from IPython.display import Image, SVG
+
 
 class AsymptoteException(RuntimeError):
     """
@@ -23,6 +27,7 @@ class AsymptoteException(RuntimeError):
         
     def __str__(self):
         return str(self.asy_err_msg)
+
 
 class TemporaryAsymptoteFile(object):
     """
@@ -54,7 +59,8 @@ class TemporaryAsymptoteFile(object):
         
     def __exit__(self, type, value, tb):
         shutil.rmtree(self.tmp_dir)
-            
+
+
 @magics_class
 class AsymptoteMagic(Magics):
     """
@@ -63,12 +69,13 @@ class AsymptoteMagic(Magics):
     entered into the IPython cell, and outputs image
     rendered by Asymptote.
     
-	TODO: retain asymptote interpreter history between
-	multiple asymptote code cells. For example, can define
-	common setup (diagram size, pens) in this manner.
+    TODO: retain asymptote interpreter history between
+    multiple asymptote code cells. For example, can define
+    common setup (diagram size, pens) in this manner.
     TODO: implement way to communicate between python and
     asymptote, similar to Rpush/Rpull IPython magics. Should
     be easy with an api similar to http://emmett.ca/PyAsy/.
+    TODO: unicode handling.
     """
     
     def __init__(self, shell, cache_display_data=False):
@@ -114,37 +121,51 @@ class AsymptoteMagic(Magics):
         root.asy and image to root.image_extension).
         """
         args = parse_argstring(self.asy, line)
-        
+
+        content = ""
+        if args.asy_file:
+            with open(args.asy_file) as asy_fh:
+                content = asy_fh.read() + "\n"
         if cell is not None:
-            # If any asymptote code is provided in cell,
-            # write code to an intermediate .asy file.
-            if args.asy_file:
-                with open(args.asy_file) as asy_fh:
-                    cell = asy_fh.read() + "\n" + cell
-                    
+            content += cell
+        has_accolades = content.find('{{') >= 0
+        if has_accolades:
+            # Substitute double accolade patterns with variables
+            ip = get_ipython()
+            ns_dict = ip.kernel.shell.user_ns
+
+            def replace_func(m):
+                return str(ns_dict.get(m.group(1), m.group(0)))
+
+            # noinspection RegExpRedundantEscape
+            content = re.sub(r'\{\{([^{}]+)\}\}', replace_func, content)
+        if len(content) > 0:
+            asy_file = args.asy_file
+            use_tmp = not asy_file or has_accolades
             if args.root:
                 # If root is specified, retain intermediate .asy file.
                 asy_file = args.root + ".asy"
+                use_tmp = False
                 with open(asy_file, "w") as asy_fh:
-                    asy_fh.write(cell)
-                return self.run_asy(asy_file, fmt=args.fmt)
-            else:
+                    asy_fh.write(content)
+            if use_tmp:
                 # If a filename is not specified (most use cases),
                 # intermediate asymptote file and image are written
                 # in a temporary directory and then cleaned up.
                 # This avoids over-cluttering files.
-                with TemporaryAsymptoteFile(cell) as tmp_asy:
+                with TemporaryAsymptoteFile(content) as tmp_asy:
                     return self.run_asy(tmp_asy.asy_files[0], fmt=args.fmt)
-                    
-        elif args.asy_file:
-            return self.run_asy(args.asy_file, fmt=args.fmt)
-        
+            else:
+                return self.run_asy(asy_file, fmt=args.fmt)
+
     def run_asy(self, asy_file, img_file=None, fmt="png"):
         """Runs asy code in asy_file and returns IPython image"""
         asy_img, asy_stdout = run_asy_file(asy_file, img_file, fmt)
-        print(asy_stdout)
+        if len(asy_stdout) > 0:
+            print(asy_stdout)
         return asy_img
-        
+
+
 def run_asy_file(asy_file, img_file=None, fmt="png"):
     """Runs asymptote code located in asy_file and writes to
     img_file if specified, otherwise use's asymptote's default
@@ -168,6 +189,7 @@ def run_asy_file(asy_file, img_file=None, fmt="png"):
     if fmt == "svg":
         return SVG(filename=img_file), asy_stdout
     return Image(filename=img_file), asy_stdout
+
 
 def load_ipython_extension(ipython):
     ipython.register_magics(AsymptoteMagic)
